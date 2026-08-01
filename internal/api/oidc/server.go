@@ -35,6 +35,7 @@ type Server struct {
 	defaultAccessTokenLifetime time.Duration
 	defaultIdTokenLifetime     time.Duration
 	jwksCacheControlMaxAge     time.Duration
+	singleAudienceClientIDs    map[string]struct{}
 
 	fallbackLogger            *slog.Logger
 	hasher                    *crypto.Hasher

@@ -72,7 +72,7 @@ func (s *Server) getUserInfo(userID, projectID, clientID string, projectRoleAsse
 	}
 }
 
-func (*Server) createIDToken(ctx context.Context, client op.Client, getUserInfo userInfoFunc, roleAssertion bool, getSigningKey sign.SignerFunc, sessionID, accessToken string, audience []string, authMethods []domain.UserAuthMethodType, authTime time.Time, nonce string, actor *domain.TokenActor) (idToken string, exp uint64, err error) {
+func (s *Server) createIDToken(ctx context.Context, client op.Client, getUserInfo userInfoFunc, roleAssertion bool, getSigningKey sign.SignerFunc, sessionID, accessToken string, audience []string, authMethods []domain.UserAuthMethodType, authTime time.Time, nonce string, actor *domain.TokenActor) (idToken string, exp uint64, err error) {
 	ctx, span := tracing.NewSpan(ctx)
 	defer func() { span.EndWithError(err) }()
 
@@ -90,7 +90,7 @@ func (*Server) createIDToken(ctx context.Context, client op.Client, getUserInfo 
 	claims := oidc.NewIDTokenClaims(
 		op.IssuerFromContext(ctx),
 		"",
-		audience,
+		selectIDTokenAudience(client.GetID(), audience, s.singleAudienceClientIDs),
 		expTime,
 		authTime,
 		nonce,
@@ -110,6 +110,13 @@ func (*Server) createIDToken(ctx context.Context, client op.Client, getUserInfo 
 	}
 	idToken, err = crypto.Sign(claims, signer)
 	return idToken, timeToOIDCExpiresIn(expTime), err
+}
+
+func selectIDTokenAudience(clientID string, audience []string, singleAudienceClientIDs map[string]struct{}) []string {
+	if _, ok := singleAudienceClientIDs[clientID]; !ok {
+		return audience
+	}
+	return []string{clientID}
 }
 
 func timeToOIDCExpiresIn(exp time.Time) uint64 {

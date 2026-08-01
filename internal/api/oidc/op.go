@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/zitadel/oidc/v3/pkg/oidc"
@@ -31,6 +32,7 @@ type Config struct {
 	AuthMethodPost                    bool
 	AuthMethodPrivateKeyJWT           bool
 	GrantTypeRefreshToken             bool
+	SingleAudienceClientIDs           []string
 	RequestObjectSupported            bool
 	DefaultAccessTokenLifetime        time.Duration
 	DefaultIdTokenLifetime            time.Duration
@@ -44,6 +46,17 @@ type Config struct {
 	PublicKeyCacheMaxAge              time.Duration
 	DefaultBackChannelLogoutLifetime  time.Duration
 	BackChannelLogout                 handlers.BackChannelLogoutWorkerConfig
+}
+
+func normalizeSingleAudienceClientIDs(clientIDs []string) map[string]struct{} {
+	normalized := make(map[string]struct{}, len(clientIDs))
+	for _, clientID := range clientIDs {
+		clientID = strings.TrimSpace(clientID)
+		if clientID != "" {
+			normalized[clientID] = struct{}{}
+		}
+	}
+	return normalized
 }
 
 // BackChannelLogoutConfig returns the BackChannelLogoutWorkerConfig and takes the deprecated TokenLifetime into account.
@@ -184,6 +197,7 @@ func NewServer(
 		defaultAccessTokenLifetime: config.DefaultAccessTokenLifetime,
 		defaultIdTokenLifetime:     config.DefaultIdTokenLifetime,
 		jwksCacheControlMaxAge:     config.JWKSCacheControlMaxAge,
+		singleAudienceClientIDs:    normalizeSingleAudienceClientIDs(config.SingleAudienceClientIDs),
 		fallbackLogger:             fallbackLogger,
 		hasher:                     hasher,
 		encAlg:                     authAlg,
