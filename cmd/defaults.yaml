@@ -637,6 +637,7 @@ OIDC:
   AuthMethodPost: true # ZITADEL_OIDC_AUTHMETHODPOST
   AuthMethodPrivateKeyJWT: true # ZITADEL_OIDC_AUTHMETHODPRIVATEKEYJWT
   GrantTypeRefreshToken: true # ZITADEL_OIDC_GRANTTYPEREFRESHTOKEN
+  SingleAudienceClientIDs: [] # ZITADEL_OIDC_SINGLEAUDIENCECLIENTIDS
   RequestObjectSupported: true # ZITADEL_OIDC_REQUESTOBJECTSUPPORTED
 
   # Sets the default values for lifetime and expiration for OIDC
