@@ -1,0 +1,212 @@
+name: BodyHealth ZITADEL Release
+
+on:
+  pull_request:
+    branches:
+      - bodyhealth/v4.15.3
+  push:
+    tags:
+      - "v*-atlas.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NX_DAEMON: "false"
+  NX_DISABLE_DB: "true"
+
+jobs:
+  checks:
+    name: Test and package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Set up Docker Compose
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/setup-compose-action@v1
+        with:
+          version: v2.38.2
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate API sources
+        run: pnpm nx run @zitadel/api:generate
+
+      - name: Check fork patch formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            internal/api/oidc/op.go
+            internal/api/oidc/server.go
+            internal/api/oidc/token.go
+            internal/api/oidc/token_test.go
+          )
+          unformatted="$(gofmt -l "${files[@]}")"
+          if [[ -n "$unformatted" ]]; then
+            echo "The following files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+          go vet ./internal/api/oidc
+
+      - name: Run focused OIDC tests
+        run: go test ./internal/api/oidc
+
+      - name: Run API unit tests
+        run: pnpm nx run @zitadel/api:test-unit
+
+      - name: Check generated files
+        run: git diff --exit-code
+
+      - name: Run API integration tests
+        if: startsWith(github.ref, 'refs/tags/')
+        run: pnpm nx run @zitadel/api:test-integration
+
+      - name: Build release image
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          ZITADEL_VERSION: ${{ github.ref_name }}
+        run: pnpm nx run @zitadel/api:pack
+
+      - name: Verify release image
+        if: startsWith(github.ref, 'refs/tags/')
+        run: docker image inspect zitadel/zitadel:local
+
+      - name: Export release image
+        if: startsWith(github.ref, 'refs/tags/')
+        run: docker save zitadel/zitadel:local | gzip > bodyhealth-zitadel-image.tar.gz
+
+      - name: Upload release image
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: bodyhealth-zitadel-image
+          path: bodyhealth-zitadel-image.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to BodyHealth ACRs
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: bodyhealth-release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ACR_NAME_DEV: ${{ vars.ACR_NAME_DEV }}
+      ACR_NAME_PROD: ${{ vars.ACR_NAME_PROD }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Validate release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-atlas\.[0-9]+$ ]]; then
+            echo "Unsupported release tag: $RELEASE_TAG"
+            exit 1
+          fi
+          if [[ -z "$ACR_NAME_DEV" || -z "$ACR_NAME_PROD" ]]; then
+            echo "ACR_NAME_DEV and ACR_NAME_PROD must both be configured."
+            exit 1
+          fi
+          if [[ "$ACR_NAME_DEV" == "$ACR_NAME_PROD" ]]; then
+            echo "Development and production ACR names must be different."
+            exit 1
+          fi
+
+      - name: Download release image
+        uses: actions/download-artifact@v4
+        with:
+          name: bodyhealth-zitadel-image
+
+      - name: Authenticate to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve registry login servers
+        id: registries
+        shell: bash
+        run: |
+          set -euo pipefail
+          dev_login="$(az acr show --name "$ACR_NAME_DEV" --query loginServer --output tsv --only-show-errors)"
+          prod_login="$(az acr show --name "$ACR_NAME_PROD" --query loginServer --output tsv --only-show-errors)"
+          echo "dev_login=$dev_login" >> "$GITHUB_OUTPUT"
+          echo "prod_login=$prod_login" >> "$GITHUB_OUTPUT"
+
+      - name: Reject an existing release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          for registry in "$ACR_NAME_DEV" "$ACR_NAME_PROD"; do
+            repositories="$(az acr repository list --name "$registry" --output tsv --only-show-errors)"
+            if grep -Fxq "zitadel" <<< "$repositories"; then
+              tags="$(az acr repository show-tags --name "$registry" --repository zitadel --output tsv --only-show-errors)"
+              if grep -Fxq "$RELEASE_TAG" <<< "$tags"; then
+                echo "zitadel:$RELEASE_TAG already exists in $registry. Release tags are immutable."
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Load and publish the release image
+        shell: bash
+        env:
+          DEV_LOGIN: ${{ steps.registries.outputs.dev_login }}
+          PROD_LOGIN: ${{ steps.registries.outputs.prod_login }}
+        run: |
+          set -euo pipefail
+          gzip -dc bodyhealth-zitadel-image.tar.gz | docker load
+          az acr login --name "$ACR_NAME_DEV" --only-show-errors
+          az acr login --name "$ACR_NAME_PROD" --only-show-errors
+
+          docker tag zitadel/zitadel:local "$DEV_LOGIN/zitadel:$RELEASE_TAG"
+          docker tag zitadel/zitadel:local "$PROD_LOGIN/zitadel:$RELEASE_TAG"
+          docker push "$DEV_LOGIN/zitadel:$RELEASE_TAG"
+          docker push "$PROD_LOGIN/zitadel:$RELEASE_TAG"
+
+      - name: Record published digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          dev_digest="$(az acr manifest show-metadata --registry "$ACR_NAME_DEV" --name "zitadel:$RELEASE_TAG" --query digest --output tsv --only-show-errors)"
+          prod_digest="$(az acr manifest show-metadata --registry "$ACR_NAME_PROD" --name "zitadel:$RELEASE_TAG" --query digest --output tsv --only-show-errors)"
+          {
+            echo "## BodyHealth ZITADEL release"
+            echo
+            echo "| Registry | Image | Digest |"
+            echo "| --- | --- | --- |"
+            echo "| Development | \`${ACR_NAME_DEV}.azurecr.io/zitadel:${RELEASE_TAG}\` | \`${dev_digest}\` |"
+            echo "| Production | \`${ACR_NAME_PROD}.azurecr.io/zitadel:${RELEASE_TAG}\` | \`${prod_digest}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
